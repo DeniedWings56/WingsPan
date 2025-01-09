@@ -18,11 +18,11 @@ kvs: main.c constants.h operations.o parser.o kvs.o
 %.o: %.c %.h
 	$(CC) $(CFLAGS) -c ${@:.o=.c}
 
-run: kvs
-	@./kvs
+run:
 
 clean:
-	rm -f *.o kvs
+	find . -type f \( -name '*.o' -o -name 'kvs' \) -delete
+	# find ./jobs -type f \( -name '*.bck' -o -name '*.out' \) -delete
 
 format:
 	@which clang-format >/dev/null 2>&1 || echo "Please install clang-format to run this command"
