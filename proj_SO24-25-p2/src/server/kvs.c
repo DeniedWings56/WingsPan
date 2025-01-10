@@ -76,6 +76,22 @@ char *read_pair(HashTable *ht, const char *key) {
   return NULL; // Key not found
 }
 
+int check_pair(HashTable *ht, const char *key) {
+  int index = hash(key);
+  KeyNode *keyNode = ht->table[index];
+  KeyNode *previousNode;
+  char *value;
+
+  while (keyNode != NULL) {
+    if (strcmp(keyNode->key, key) == 0) {
+      return 0;
+    }
+    previousNode = keyNode;
+    keyNode = previousNode->next; // Move to the next node
+  }
+  return 1;  // Key not found
+}
+
 int delete_pair(HashTable *ht, const char *key) {
   int index = hash(key);
 

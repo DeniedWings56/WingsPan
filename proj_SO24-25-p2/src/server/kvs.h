@@ -35,6 +35,12 @@ int write_pair(HashTable *ht, const char *key, const char *value);
 // return the value if found, NULL otherwise.
 char *read_pair(HashTable *ht, const char *key);
 
+// Checks if a key exists in the table.
+/// @param ht Hash table to read from.
+/// @param key Key of the pair to be checked.
+/// @return 0 if the key exists, 1 otherwise.
+int check_pair(HashTable *ht, const char *key);
+
 /// Deletes a pair from the table.
 /// @param ht Hash table to read from.
 /// @param key Key of the pair to be deleted.

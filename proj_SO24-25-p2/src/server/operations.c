@@ -87,6 +87,20 @@ int kvs_read(size_t num_pairs, char keys[][MAX_STRING_SIZE], int fd) {
   return 0;
 }
 
+// Check if a key exists in the table.
+int kvs_check(char key[MAX_STRING_SIZE]){
+  if (kvs_table == NULL) {
+    fprintf(stderr, "KVS state must be initialized\n");
+    return 1;
+  }
+
+  pthread_rwlock_rdlock(&kvs_table->tablelock);
+  int result = check_pair(kvs_table, key);
+  pthread_rwlock_unlock(&kvs_table->tablelock);
+
+  return result;
+}
+
 int kvs_delete(size_t num_pairs, char keys[][MAX_STRING_SIZE], int fd) {
   if (kvs_table == NULL) {
     fprintf(stderr, "KVS state must be initialized\n");
