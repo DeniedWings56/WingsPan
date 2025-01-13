@@ -11,6 +11,7 @@
 
 #include "constants.h"
 #include "../common/constants.h"
+#include "../common/protocol.h"
 #include "io.h"
 #include "operations.h"
 #include "parser.h"
@@ -26,6 +27,8 @@ struct SharedData
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t n_current_backups_lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t client_thread_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+volatile sig_atomic_t sigusr1_received = 0;
 
 size_t active_backups = 0; // Number of active backups
 size_t max_backups;        // Maximum allowed simultaneous backups
@@ -55,6 +58,12 @@ struct client_threads
 };
 
 struct client_threads client_threads[MAX_NUMBER_SESSIONS];
+
+void handle_sigusr1(int sig)
+{
+  printf("Received SIGUSR1 in Handle\n");
+  sigusr1_received = 1;
+}
 
 int filter_job_files(const struct dirent *entry)
 {
@@ -92,6 +101,60 @@ static int entry_files(const char *dir, struct dirent *entry, char *in_path,
   return 0;
 }
 
+// Notify client about changes in subscribed keys
+void format_message(const char *key, const char *value, char *formatted_msg)
+{
+  // Cria buffers de tamanho fixo para key e value com padding.
+  char padded_key[MAX_STRING_SIZE] = {0};
+  char padded_value[MAX_STRING_SIZE + 1] = {0};
+
+  // Copia a key e adiciona padding.
+  snprintf(padded_key, MAX_STRING_SIZE + 1, "%-40s", key);
+
+  // Copia o value e adiciona padding.
+  snprintf(padded_value, MAX_STRING_SIZE + 1, "%-40s", value);
+
+  // Concatena key e value no formato correto.
+  snprintf(formatted_msg, 2 * (MAX_STRING_SIZE + 1), "%s%s", padded_key, padded_value);
+}
+
+int notify_client(const char *key, const char *value)
+{
+  char formatted_msg[2 * (MAX_STRING_SIZE + 1)] = {0};
+  format_message(key, value, formatted_msg);
+
+  for (int i = 0; i < MAX_NUMBER_SESSIONS; i++)
+  {
+    if (clients[i].id != -1 && clients[i].subscriptions[0][0] != '\0')
+    {
+      for (int j = 0; j < MAX_NUMBER_SUB; j++)
+      {
+        if (clients[i].subscriptions[j][0] != '\0' &&
+            strcmp(clients[i].subscriptions[j], key) == 0)
+        {
+          printf("Notifying client %d about key %s\n", i, key);
+
+          int notif_pipe_fd = open(clients[i].notif_pipe_path, O_WRONLY);
+          if (notif_pipe_fd == -1)
+          {
+            perror("Failed to open notification pipe");
+            return 1;
+          }
+          // Escreve a mensagem formatada no pipe.
+          if (write(notif_pipe_fd, formatted_msg, sizeof(formatted_msg)) == -1)
+          {
+            perror("Failed to write to notification pipe");
+            close(notif_pipe_fd);
+            return 1;
+          }
+          close(notif_pipe_fd);
+        }
+      }
+    }
+  }
+  return 0;
+}
+
 static int run_job(int in_fd, int out_fd, char *filename)
 {
   size_t file_backups = 0;
@@ -117,6 +180,13 @@ static int run_job(int in_fd, int out_fd, char *filename)
       {
         write_str(STDERR_FILENO, "Failed to write pair\n");
       }
+
+      // Notify clients about changes in subscribed keys
+      for (size_t i = 0; i < num_pairs; i++)
+      {
+        notify_client(keys[i], values[i]);
+      }
+
       break;
 
     case CMD_READ:
@@ -149,6 +219,13 @@ static int run_job(int in_fd, int out_fd, char *filename)
       {
         write_str(STDERR_FILENO, "Failed to delete pair\n");
       }
+
+      // Notify clients about delete in subscribed keys
+      for (size_t i = 0; i < num_pairs; i++)
+      {
+        notify_client(keys[i], "DELETED");
+      }
+
       break;
 
     case CMD_SHOW:
@@ -222,6 +299,7 @@ static int run_job(int in_fd, int out_fd, char *filename)
 // frees arguments
 static void *get_file(void *arguments)
 {
+  block_sigusr1();
   struct SharedData *thread_data = (struct SharedData *)arguments;
   DIR *dir = thread_data->dir;
   char *dir_name = thread_data->dir_name;
@@ -319,7 +397,7 @@ int register_client(char *client_req_pipe_path, char *client_resp_pipe_path, cha
     if (allocated_thread == -1)
     {
       pthread_mutex_unlock(&client_thread_mutex);
-      printf("No free threads available. Waiting...\n");
+      // printf("No free threads available. Waiting...\n");
       sleep(1);
       pthread_mutex_lock(&client_thread_mutex);
     }
@@ -330,6 +408,19 @@ int register_client(char *client_req_pipe_path, char *client_resp_pipe_path, cha
   clients[allocated_thread].req_pipe_path = strdup(client_req_pipe_path);
   clients[allocated_thread].resp_pipe_path = strdup(client_resp_pipe_path);
   clients[allocated_thread].notif_pipe_path = strdup(client_notif_pipe_path);
+  if (!clients[allocated_thread].req_pipe_path ||
+      !clients[allocated_thread].resp_pipe_path ||
+      !clients[allocated_thread].notif_pipe_path)
+  {
+    printf("Memory allocation failed for pipe paths.\n");
+    pthread_mutex_unlock(&client_thread_mutex);
+    return 1;
+  }
+
+  printf("Client registered successfully on thread %d.\n", allocated_thread);
+  printf("Request pipe path: %s\n", clients[allocated_thread].req_pipe_path);
+  printf("Response pipe path: %s\n", clients[allocated_thread].resp_pipe_path);
+  printf("Notification pipe path: %s\n", clients[allocated_thread].notif_pipe_path);
 
   if (!clients[allocated_thread].req_pipe_path || !clients[allocated_thread].resp_pipe_path || !clients[allocated_thread].notif_pipe_path)
   {
@@ -343,41 +434,169 @@ int register_client(char *client_req_pipe_path, char *client_resp_pipe_path, cha
   return 0; // Success
 }
 
-// Handle client requests
-// DELAY 5000
-// SUBSCRIBE [a]
-// SUBSCRIBE [NONE]
-// DELAY 10000
-// UNSUBSCRIBE [a]
-// DISCONNECT
-
-int handle_client_request(int client_id, char *command, char *args)
+int send_response(const char *pipe_path, char op_code, char status)
 {
-  printf("Client %d: %s %s\n", client_id, command, args);
-
-  if (strcmp(command, "DELAY") == 0)
+  if (!pipe_path)
   {
-    int delay = atoi(args);
-    if (delay > 0)
+    return -1;
+  }
+
+  int fd = open(pipe_path, O_WRONLY);
+  if (fd == -1)
+  {
+    perror("Failed to open response pipe");
+    return -1;
+  }
+
+  char response[2] = {op_code, status};
+  ssize_t bytes_written = write(fd, response, sizeof(response));
+  close(fd);
+
+  return (bytes_written == sizeof(response)) ? 0 : -1;
+}
+
+static void free_thread(int thread_id)
+{
+  pthread_mutex_lock(&client_thread_mutex);
+  client_threads[thread_id].free = 1; // Mark thread as free
+  pthread_mutex_unlock(&client_thread_mutex);
+}
+
+void clean_pipes(int thread_id)
+{
+  pthread_mutex_lock(&client_thread_mutex);
+
+  // Clean pipe paths
+  if (clients[thread_id].req_pipe_path)
+  {
+    unlink(clients[thread_id].req_pipe_path);
+    free(clients[thread_id].req_pipe_path);
+    clients[thread_id].req_pipe_path = NULL;
+  }
+
+  if (clients[thread_id].resp_pipe_path)
+  {
+    unlink(clients[thread_id].resp_pipe_path);
+    free(clients[thread_id].resp_pipe_path);
+    clients[thread_id].resp_pipe_path = NULL;
+  }
+
+  if (clients[thread_id].notif_pipe_path)
+  {
+    unlink(clients[thread_id].notif_pipe_path);
+    free(clients[thread_id].notif_pipe_path);
+    clients[thread_id].notif_pipe_path = NULL;
+  }
+
+  pthread_mutex_unlock(&client_thread_mutex);
+}
+
+void trim_char(char *str)
+{
+  size_t str_value = strlen(str);
+  while (str_value > 0 && str[str_value - 1] == ' ')
+  {
+    str_value--;
+    str[str_value] = '\0';
+  }
+}
+
+int receive_request(const char *pipe_path, int client_id)
+{
+  if (!pipe_path)
+  {
+    fprintf(stderr, "Invalid response pipe path\n");
+    return -1;
+  }
+
+  // Open the pipe for reading
+  int pipe_fd = open(pipe_path, O_RDONLY);
+  if (pipe_fd == -1)
+  {
+    perror("Failed to open pipe");
+    return -1;
+  }
+
+  char buffer[MAX_STRING_SIZE * 3 + 2] = {0};
+
+  // Read response from the pipe
+  ssize_t bytes_read = read(pipe_fd, buffer, sizeof(buffer) - 1);
+  if (bytes_read < 0)
+  {
+    perror("Failed to read response from pipe");
+    close(pipe_fd);
+    return -1;
+  }
+  close(pipe_fd);
+
+  buffer[bytes_read] = '\0'; // Null-terminate the buffer
+  printf("Raw response: '%s'\n", buffer);
+
+  // Decode and handle the response
+  char req_op_code = buffer[0]; // Extract OP_CODE
+  int req_op_code_int = req_op_code - '0';
+
+  char args[41] = {0};
+
+  int status = 0;
+  char response_status = {0};
+
+  if (client_id == -1) // Hostess request
+  {
+    req_op_code_int = OP_CODE_CONNECT;
+
+    printf("Request Client: NULL\n");
+  }
+  else
+  {
+    printf("Request Client: %d\n", client_id);
+  }
+
+  printf("Request OP_CODE: %d\n", req_op_code_int);
+  ;
+
+  switch (req_op_code_int)
+  {
+  case OP_CODE_CONNECT:
+    printf("OP_CODE_CONNECT\n");
+
+    char req_pipe_path[PIPE_BUF] = {0};
+    char resp_client_pipe_path[PIPE_BUF] = {0};
+    char notif_pipe_path[PIPE_BUF] = {0};
+
+    sscanf(buffer, "%*c%40s%40s%40s", req_pipe_path, resp_client_pipe_path, notif_pipe_path);
+
+    // Trim trailing whitespaces
+    trim_char(req_pipe_path);
+    trim_char(resp_client_pipe_path);
+    trim_char(notif_pipe_path);
+
+    printf("Request pipe: %s\n", req_pipe_path);
+    printf("Response pipe1: %s\n", resp_client_pipe_path);
+    printf("Notification pipe: %s\n", notif_pipe_path);
+
+    // Register the client
+    status = register_client(req_pipe_path, resp_client_pipe_path, notif_pipe_path);
+    printf("Register client status: %d\n", status);
+
+    // Send a response to the client
+    response_status = status == 0 ? '0' : '1';
+    if (send_response(resp_client_pipe_path, req_op_code, response_status) == -1)
     {
-      printf("Waiting %d \n", delay);
-      // usleep(delay * 1000);
-    }
-    else
-    {
-      printf("Invalid delay value\n");
+      printf("Failed to send response to client.\n");
       return 1;
     }
+    break;
 
-    return 0;
-  }
-  else if (strcmp(command, "SUBSCRIBE") == 0)
-  {
-    // Check if the key exists in KVS
+  case OP_CODE_SUBSCRIBE:
+    sscanf(buffer, "%*c%40s", args);
+    printf("Key: %s\n", args);
+    trim_char(args);
+    printf("Subscribing to key: '%s'\n", args);
     if (kvs_check(args) != 0)
     {
       printf("Key %s not exists in KVS table.\n", args);
-      return 1;
+      status = 1;
     }
 
     // Check if client subscriptions is full
@@ -389,20 +608,24 @@ int handle_client_request(int client_id, char *command, char *args)
         sub_count++;
       }
     }
+
     if (sub_count >= MAX_NUMBER_SUB)
     {
       printf("Client subscriptions is full.\n");
-      return 1;
+      status = 1;
     }
 
     // Subscribe to a key
-    printf("Subscribing to key: %s\n", args);
-    for (int i = 0; i < MAX_NUMBER_SUB; i++)
+    if (status != 1)
     {
-      if (clients[client_id].subscriptions[i][0] == '\0')
+      printf("Subscribing to key: %s\n", args);
+      for (int i = 0; i < MAX_NUMBER_SUB; i++)
       {
-        strcpy(clients[client_id].subscriptions[i], args);
-        break;
+        if (clients[client_id].subscriptions[i][0] == '\0')
+        {
+          strcpy(clients[client_id].subscriptions[i], args);
+          break;
+        }
       }
     }
 
@@ -417,11 +640,24 @@ int handle_client_request(int client_id, char *command, char *args)
     }
     printf("\n");
 
-    return 0;
-  }
-  else if (strcmp(command, "UNSUBSCRIBE") == 0)
-  {
+    // Send a response to the client
+    response_status = status == 0 ? '0' : '1';
+    printf("Thread ID: %d\n", client_id);
+    printf("Response status: %c\n", response_status);
+    printf("Response pipe2: %s\n", clients[client_id].resp_pipe_path);
+    if (send_response(clients[client_id].resp_pipe_path, req_op_code, response_status) == -1)
+    {
+      printf("Failed to send response to client.\n");
+      return 1;
+    }
+    break;
+
+  case OP_CODE_UNSUBSCRIBE:
     // Check if client subscriptions contain the key
+    sscanf(buffer, "%*c%40s", args);
+    printf("Key: %s\n", args);
+    trim_char(args);
+
     int unsubscribed = 0;
     for (int i = 0; i < MAX_NUMBER_SUB; i++)
     {
@@ -437,7 +673,7 @@ int handle_client_request(int client_id, char *command, char *args)
     if (!unsubscribed)
     {
       printf("Key %s not found in client subscriptions.\n", args);
-      return 1;
+      status = 1;
     }
 
     // Print the updated subscriptions
@@ -451,53 +687,55 @@ int handle_client_request(int client_id, char *command, char *args)
     }
     printf("\n");
 
-    return 0;
-  }
-  else if (strcmp(command, "DISCONNECT") == 0)
-  {
+    // Send a response to the client
+    response_status = status == 0 ? '0' : '1';
+    if (send_response(clients[client_id].resp_pipe_path, req_op_code, response_status) == -1)
+    {
+      printf("Failed to send response to client.\n");
+      return 1;
+    }
+    break;
+
+  case OP_CODE_DISCONNECT:
     // Clean subscriptions
     for (int i = 0; i < MAX_NUMBER_SUB; i++)
     {
       clients[client_id].subscriptions[i][0] = '\0';
     }
 
-    // Close the client's request pipe
-    free(clients[client_id].req_pipe_path);
+    // Send a response to the client
+    response_status = '0';
+    if (send_response(clients[client_id].resp_pipe_path, req_op_code, response_status) == -1)
+    {
+      printf("Failed to send response to client.\n");
+      return 1;
+    }
 
-    clients[client_id].req_pipe_path = NULL;
+    // Clean pipes and subscriptions
+    printf("Cleaning pipes for client %d\n", client_id);
+    printf("Pipes: %s\n", clients[client_id].req_pipe_path);
+    clean_pipes(client_id);
+    printf("Cleaning pipes successfully for client %d\n", client_id);
+    printf("Pipes: %s\n", clients[client_id].req_pipe_path);
 
-    return 0;
+    printf("Free manager client %d\n", client_id);
+    printf("Free Status: %s\n", client_threads[client_id].free);
+    free_thread(client_id);
+    printf("Thread manager client %d unregistered\n", client_id);
+
+    break;
+
+  default:
+    fprintf(stderr, "Unsupported op_code: %c\n", req_op_code);
+    return -1;
   }
-  else
-  {
-    printf("Invalid command\n");
-    return 1;
-  }
-}
 
-static void free_thread(int thread_id)
-{
-  pthread_mutex_lock(&client_thread_mutex);
-  client_threads[thread_id].free = 1; // Mark thread as free
-  pthread_mutex_unlock(&client_thread_mutex);
-}
-
-void clean_pipes(int thread_id)
-{
-  pthread_mutex_lock(&client_thread_mutex);
-
-  // Clean pipe paths
-  free(clients[thread_id].resp_pipe_path);
-  free(clients[thread_id].notif_pipe_path);
-
-  clients[thread_id].resp_pipe_path = NULL;
-  clients[thread_id].notif_pipe_path = NULL;
-
-  pthread_mutex_unlock(&client_thread_mutex);
+  return 0;
 }
 
 static void *client_manager_thread(void *arg)
 {
+  block_sigusr1();
 
   int thread_id = *(int *)arg;
 
@@ -509,176 +747,75 @@ static void *client_manager_thread(void *arg)
       sleep(1);
     }
 
-
-    // Wait until clients[thread_id] is not NULL
-    while (clients[thread_id].req_pipe_path == NULL)
-    {
-      sleep(1); // Sleep for 1 second
-    }
-
     printf("Thread manager client %d registered\n", thread_id);
 
     while (clients[thread_id].req_pipe_path)
     {
-      // Open the request pipe for reading
-      printf("Thread manager client %d opening request pipe\n", thread_id);
-      int req_pipe_fd = open(clients[thread_id].req_pipe_path, O_RDONLY);
-      if (req_pipe_fd == -1)
-      {
-        perror("Failed to open request pipe");
-        exit(1);
-      }
-      printf("Thread manager client %d received request pipe\n", thread_id);
-
-      char buffer[PIPE_BUF] = {0};
-      if (read(req_pipe_fd, buffer, PIPE_BUF) == -1)
-      {
-        perror("Failed to read from request pipe");
-        exit(1);
-      }
-
-      // Close the request pipe
-      close(req_pipe_fd);
-
-      // Get command and arguments from the request pipe
-      char command[PIPE_BUF] = {0};
-      char args[PIPE_BUF] = {0};
-
-      if (sscanf(buffer, "%s", command) != 1)
-      {
-        fprintf(stderr, "Failed to parse command\n");
-        exit(1);
-      }
-
-      // Get the arguments
-      char *args_start = strchr(buffer, ' ');
-      if (args_start != NULL)
-      {
-        strcpy(args, args_start + 1);
-        // Remove trailing newline if present
-        size_t len = strlen(args);
-        if (len > 0 && args[len - 1] == '\n')
-        {
-          args[len - 1] = '\0';
-        }
-      }
-      else
-      {
-        args[0] = '\0'; // No arguments
-      }
-
-      int status = 0;
-      // Handle the client request
-      if (handle_client_request(clients[thread_id].id, command, args) != 0)
-      {
-        fprintf(stderr, "Failed to handle client request\n");
-        status = 1;
-      }
-
-      // Send a response to the client through the response pipe
-      int client_resp_fd = open(clients[thread_id].resp_pipe_path, O_WRONLY);
-      if (client_resp_fd == -1)
-      {
-        perror("Failed to open client response pipe");
-        exit(1);
-      }
-
-      // 0 - Success, 1 - Failure
-      char response_status = status == 0 ? '0' : '1';
-      if (write(client_resp_fd, &response_status, sizeof(response_status)) == -1)
-      {
-        perror("Failed to write response");
-      }
-
-      close(client_resp_fd);
+      printf("Waiting for client request on pipe %s\n", clients[thread_id].req_pipe_path);
+      receive_request(clients[thread_id].req_pipe_path, thread_id);
     }
-
-    // Clean pipes and subscriptions
-    clean_pipes(thread_id);
-
-    // Mark thread as free
-    free_thread(thread_id);
   }
 
   return NULL;
 }
 
-static void *hostess_thread()
+void block_sigusr1(void)
 {
-  printf("Thread hostess pipe started\n");
-  int server_fd = open(server_pipe_path, O_RDONLY);
-  if (server_fd == -1)
+  sigset_t mask;
+  sigemptyset(&mask);
+  sigaddset(&mask, SIGUSR1);
+  if (pthread_sigmask(SIG_BLOCK, &mask, NULL) != 0)
   {
-    perror("Failed to open server pipe");
-    exit(1);
+    perror("pthread_sigmask block");
   }
+}
 
+static void *hostess_thread(void *arg)
+{
+
+  sigset_t mask;
+  sigemptyset(&mask);
+
+  printf("Thread hostess pipe started\n");
   printf("Waiting for client connection...\n");
   while (1)
   {
-    int status;
-    char buffer[PIPE_BUF] = {0}; // Initialize buffer to zeros
-
-    // Read from the server pipe and check return value
-    ssize_t bytes_read = read(server_fd, buffer, PIPE_BUF - 1);
-    if (bytes_read <= 0)
+    sigaddset(&mask, SIGUSR1);
+    if (pthread_sigmask(SIG_UNBLOCK, &mask, NULL) != 0)
     {
-      if (bytes_read < 0)
-        perror("Error reading from pipe");
-      continue;
+      perror("pthread_sigmask hostess");
+      return NULL;
     }
 
-    buffer[bytes_read] = '\0'; // Null terminate based on actual bytes read
+    printf("Waiting for client connection...\n");
+    sleep(1);
 
-    // Verify the message starts with "CONNECT ["
-    if (strncmp(buffer, "CONNECT [", 9) != 0)
+    printf("sigusr1_received: %d\n", sigusr1_received);
+    // Handle SIGUSR1
+    if (sigusr1_received)
     {
-      fprintf(stderr, "Invalid message format\n");
-      continue;
+      printf("SIGUSR1 received in hostess thread\n");
+
+      // Elimina todas as subscrições e encerra os FIFOs
+      for (int i = 0; i < MAX_NUMBER_SESSIONS; i++)
+      {
+        if (client_threads[i].free == 0)
+        {
+          clean_pipes(i);
+          free_thread(i);
+        }
+      }
+      sigusr1_received = 0;
+      printf("All clients terminated\n");
     }
 
-    // Extract paths from the message
-    char req_pipe_path[PIPE_BUF] = {0};
-    char resp_pipe_path[PIPE_BUF] = {0};
-    char notif_pipe_path[PIPE_BUF] = {0};
-
-    if (sscanf(buffer, "CONNECT [%[^,],%[^,],%[^]]]",
-               req_pipe_path, resp_pipe_path, notif_pipe_path) != 3)
-    {
-      fprintf(stderr, "Failed to parse connection message\n");
-      continue;
-    }
-
-    printf("Request pipe: %s\n", req_pipe_path);
-    printf("Response pipe: %s\n", resp_pipe_path);
-    printf("Notification pipe: %s\n", notif_pipe_path);
-    printf("Received message from client: %s\n", buffer);
-
-    // Register client
-    status = register_client(req_pipe_path, resp_pipe_path, notif_pipe_path);
-
-    // Send a response to the client through the response pipe
-    int client_resp_fd = open(resp_pipe_path, O_WRONLY);
-    if (client_resp_fd == -1)
-    {
-      perror("Failed to open client response pipe");
-      continue; // Don't exit, just try next connection
-    }
-
-    // 0 - Success, 1 - Failure
-    char response_status = status == 0 ? '0' : '1';
-    if (write(client_resp_fd, &response_status, sizeof(response_status)) == -1)
-    {
-      perror("Failed to write response");
-    }
-
-    close(client_resp_fd);
+    // Receive Request - Register client - Send Response
+    receive_request(server_pipe_path, -1);
 
     printf("Response sent to client\n");
     printf("\n-----------------------\n");
   }
 
-  close(server_fd);
   return NULL;
 }
 
@@ -774,6 +911,12 @@ int init_server_pipe()
 
 int main(int argc, char **argv)
 {
+  struct sigaction sa;
+  sa.sa_handler = handle_sigusr1;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = 0;
+  sigaction(SIGUSR1, &sa, NULL);
+
   if (argc < 5)
   {
     write_str(STDERR_FILENO, "Usage: ");
