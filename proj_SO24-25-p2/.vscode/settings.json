@@ -1,7 +1,0 @@
-{
-  "files.associations": {
-    "fcntl.h": "c",
-    "protocol.h": "c",
-    "pthread.h": "c"
-  }
-}

@@ -280,81 +280,63 @@ void trim_char(char *str)
 // Thread function to handle with notifications from the server
 void parse_notification(char *message, char *key, char *value)
 {
+  // Copy the first 40 characters into `key`
+  strncpy(key, message, 40);
+  key[40] = '\0'; // Ensure null termination
+  trim_char(key); // Remove padding spaces
 
-  // Debug message
-  // printf("Raw message received: '%s'\n", message);
-
-  // Copia os 40 primeiros caracteres para a chave.
-  strncpy(key, message, MAX_STRING_SIZE);
-  key[MAX_STRING_SIZE] = '\0'; // Garante a terminação.
-
-  // Trim key
-  trim_char(key);
-
-  // Copia os próximos 40 caracteres para o valor.
-  strncpy(value, message + MAX_STRING_SIZE, MAX_STRING_SIZE);
-  value[MAX_STRING_SIZE] = '\0'; // Garante a terminação.
-
-  // Trim value
-  trim_char(value);
+  // Copy the next 40 characters into `value`
+  strncpy(value, message + 40, 40);
+  value[40] = '\0'; // Ensure null termination
+  trim_char(value); // Remove padding spaces
 }
 
 void *notification_handler(void *arg)
 {
+  if (check_pipe_path(saved_notif_pipe_path) != 0)
+  {
+    fprintf(stderr, "Pipe not found (closed by server): %s\n", saved_notif_pipe_path);
+    exit(1);
+  }
+
+  int notif_pipe_fd = open(saved_notif_pipe_path, O_RDONLY);
+  if (notif_pipe_fd == -1)
+  {
+    perror("Failed to open notification pipe");
+    return NULL;
+  }
+
   while (1)
   {
-    char buffer[2 * (MAX_STRING_SIZE + 1)] = {0};
-
     if (check_pipe_path(saved_notif_pipe_path) != 0)
     {
-      fprintf(stderr, "Pipe not found (closed by server) : %s\n", saved_notif_pipe_path);
+      fprintf(stderr, "Pipe notification not found (closed by server): %s\n", saved_notif_pipe_path);
       exit(1);
     }
 
-    // printf("Waiting for notification...\n");
-    int notif_pipe_fd = open(saved_notif_pipe_path, O_RDONLY);
-    if (notif_pipe_fd == -1)
-    {
-      perror("Failed to open notification pipe");
-      return NULL;
-    }
+    // Buffer for exactly one message (82 bytes)
+    char buffer[82] = {0};
 
-    ssize_t bytes_read = read(notif_pipe_fd, buffer, sizeof(buffer) - 1);
-    if (bytes_read <= 0)
+    // Read one full message
+    ssize_t bytes_read = read(notif_pipe_fd, buffer, sizeof(buffer));
+    if (bytes_read < 82)
     {
       if (bytes_read == 0)
-      {
-        // EOF: O servidor fechou o pipe.
-        perror("Notification pipe closed by server.\n");
-      }
-      else
-      {
-        perror("Failed to read from notification pipe");
-      }
-      close(notif_pipe_fd);
-      return NULL;
+        continue; // No data, keep waiting
+      fprintf(stderr, "Incomplete message received (%zd bytes)\n", bytes_read);
+      continue;
     }
 
-    // Garante que o buffer seja sempre terminado.
-    buffer[bytes_read] = '\0';
-
-    // Separa chave e valor.
-    char key[MAX_STRING_SIZE + 1] = {0};
-    char value[MAX_STRING_SIZE + 1] = {0};
+    // Parse key and value
+    char key[41] = {0};
+    char value[41] = {0};
     parse_notification(buffer, key, value);
 
-    // Exibe a notificação formatada.
-    // printf("\n------- NOTIFICATION -------\n");
-    // printf("Key: '%s'\n", key);
-    // printf("Value: '%s'\n", value);
-    // printf("---------------------------\n\n");
-
-    // <chave>,<valor>)
+    // Output the notification
     printf("(%s,%s)\n", key, value);
-
-    close(notif_pipe_fd);
   }
 
+  close(notif_pipe_fd);
   return NULL;
 }
 
