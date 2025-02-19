@@ -18,7 +18,7 @@ kvs: main.c constants.h operations.o parser.o kvs.o
 %.o: %.c %.h
 	$(CC) $(CFLAGS) -c ${@:.o=.c}
 
-run:
+run: ./kvs 
 
 clean:
 	find . -type f \( -name '*.o' -o -name 'kvs' \) -delete
