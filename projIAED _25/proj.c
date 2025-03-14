@@ -6,6 +6,13 @@
 #define MAX_BATCH 20
 #define MAX_VACCINES 1000
 
+#define ERR_TOO_MANY_VACCINES   "too many vaccines"
+#define ERR_DUPLICATE_BATCH     "duplicate batch number"
+#define ERR_INVALID_BATCH       "invalid batch"
+#define ERR_INVALID_NAME        "invalid name"
+#define ERR_INVALID_DATE        "invalid date"
+#define ERR_INVALID_QUANTITY    "invalid quantity"
+
 typedef struct {
     char *name;                     /**< vaccine name*/
     char batch[MAX_BATCH + 1];      /**< batch id*/
@@ -28,6 +35,7 @@ Inoculation *inoculations = NULL;        /**< linked list of inoculations*/
 int checkVaccineName(const char *name) {
     for (int i = 0; name[i] != '\0'; i++) {
         if (isspace((unsigned char)name[i])) {
+            printf("%s\n", ERR_INVALID_NAME);
             return 0;
         }
     }
@@ -38,10 +46,12 @@ int checkVaccineName(const char *name) {
 int checkBatchName(const char *batch) {
     int len = strlen(batch);
     if (len > MAX_BATCH) {
+        printf("%s\n", ERR_INVALID_BATCH);
         return 0;
     }
     for (int i = 0; i < len; i++) {
         if (!isdigit(batch[i]) && !(batch[i] >= 'A' && batch[i] <= 'F')){
+            printf("%s\n", ERR_INVALID_BATCH);
             return 0;
         }
     }
@@ -51,6 +61,7 @@ int checkBatchName(const char *batch) {
 /**< Função para validar data*/
 int checkDate(int *day, int *month, int *year) {
     if (*day < 1 || *day > 31 || *month < 1 || *month > 12 || *year < 0) {
+        printf("%s\n", ERR_INVALID_DATE);
         return 0;
     }
     return 1;
@@ -59,6 +70,7 @@ int checkDate(int *day, int *month, int *year) {
 /**< Adicionar um novo batch*/
 void addBatch(const char *batch, int day, int month, int year, int doses, const char *name) {
     if (totalVaccines >= MAX_VACCINES) {
+        printf("%s\n", ERR_TOO_MANY_VACCINES);
         return;
     }
 
@@ -69,8 +81,14 @@ void addBatch(const char *batch, int day, int month, int year, int doses, const 
     /**< Verificar se o batch já existe*/
     for (int i = 0; i < totalVaccines; i++) {
         if (strcmp(vaccines[i].batch, batch) == 0) {
+            printf("%s\n", ERR_DUPLICATE_BATCH);
             return;
         }
+    }
+
+    if (doses <= 0) {
+        printf("%s\n", ERR_INVALID_QUANTITY);
+        return;
     }
 
     /**< Aloca memória para um novo batch*/
@@ -193,23 +211,88 @@ void freeMemory() {
 int main() {
     char action;
 
-    scanf(" %c", &action);  /**< O espaço antes de %c evita problemas com buffer do teclado*/
+    scanf(" %c", &action);  // Captura apenas um caractere
+    printf("Você digitou: %c\n", action);
+    return 0;
+    //scanf(" %c", &action);  /**< O espaço antes de %c evita problemas com buffer do teclado*/
 
+     // Aloca um buffer dinâmico para ler uma linha de tamanho ilimitado
+    /**size_t buffer_size = 1000;  // Começa com um tamanho razoável
+    char *input = (char *)malloc(buffer_size * sizeof(char));
+    
+    if (input == NULL) {
+        printf("Erro ao alocar memória para a linha de entrada.\n");
+        return 1;
+    }
+
+    // Lê a linha inteira de uma vez
+    printf("Digite uma ação (c, q): ");
+    if (getline(&input, &buffer_size, stdin) == -1) {
+        printf("Erro ao ler a linha de entrada.\n");
+        free(input);
+        return 1;
+    }
+
+    // Processa o primeiro caractere como a ação (ex: 'c')
+    sscanf(input, " %c", &action);*/
+
+    // Processa a ação com base na entrada
     switch (action) {
         case 'q':
             //freeMemory();
             return 0;
         case 'c':
+            printf("Processando comando 'c'\n");
             char batch[MAX_BATCH + 1];
             int day, month, year, doses;
-            char name[51];
+            char *name = (char *)malloc(51 * sizeof(char));
+            if (name == NULL) {
+                printf("No memory\n");
+                break;
+            }
 
-            if (sscanf(strtok(NULL, " "), "%20s", batch) != 1) break;
+            getchar(); // Limpa o \n deixado no buffer
+            char input[200];
+            fgets(input, sizeof(input), stdin);
+            char* token = strtok(input, " ");
+            if (token == NULL || sscanf(token, "%20s", batch) != 1) {
+                printf("Erro: Não foi possível ler o batch.\n");
+                free(name); // Libera a memória alocada antes de sair
+                break;
+            }
+
+            token = strtok(NULL, " ");
+            if (token == NULL || sscanf(token, "%d-%d-%d", &day, &month, &year) != 3) {
+                printf("Erro: Não foi possível ler a data.\n");
+                free(name); // Libera a memória alocada antes de sair
+                break;
+            }
+
+            token = strtok(NULL, " ");
+            if (token == NULL || sscanf(token, "%d", &doses) != 1) {
+                printf("Erro: Não foi possível ler o número de doses.\n");
+                free(name); // Libera a memória alocada antes de sair
+                break;
+            }
+
+            token = strtok(NULL, "\n");
+            if (token == NULL || sscanf(token, "%50s", name) != 1) {
+                printf("Erro: Não foi possível ler o nome.\n");
+                free(name); // Libera a memória alocada antes de sair
+                break;
+            }
+
+            // Exibe os valores lidos
+            printf("batch: %s, date: %02d-%02d-%d, doses: %d, name: %s\n", batch, day, month, year, doses, name);
+
+            /**if (sscanf(strtok(NULL, " "), "%20s", batch) != 1) break;
             if (sscanf(strtok(NULL, " "), "%d-%d-%d", &day, &month, &year) != 3) break;
             if (sscanf(strtok(NULL, " "), "%d", &doses) != 1) break;
             if (sscanf(strtok(NULL, "\n"), "%50s", name) != 1) break;
+            printf("batch: %s, date: %02d-%02d-%d, doses: %d, name: %s\n", batch, day, month, year, doses, name);*/
 
             addBatch(batch, day, month, year, doses, name);
+            free(name);
             break;
         case 'l':
             break;
