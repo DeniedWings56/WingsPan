@@ -213,33 +213,14 @@ int main() {
 
     scanf(" %c", &action);  // Captura apenas um caractere
     printf("Você digitou: %c\n", action);
-    return 0;
-    //scanf(" %c", &action);  /**< O espaço antes de %c evita problemas com buffer do teclado*/
-
-     // Aloca um buffer dinâmico para ler uma linha de tamanho ilimitado
-    /**size_t buffer_size = 1000;  // Começa com um tamanho razoável
-    char *input = (char *)malloc(buffer_size * sizeof(char));
     
-    if (input == NULL) {
-        printf("Erro ao alocar memória para a linha de entrada.\n");
-        return 1;
-    }
-
-    // Lê a linha inteira de uma vez
-    printf("Digite uma ação (c, q): ");
-    if (getline(&input, &buffer_size, stdin) == -1) {
-        printf("Erro ao ler a linha de entrada.\n");
-        free(input);
-        return 1;
-    }
-
-    // Processa o primeiro caractere como a ação (ex: 'c')
-    sscanf(input, " %c", &action);*/
+    getchar();  // Limpa o \n deixado no buffer
 
     // Processa a ação com base na entrada
     switch (action) {
         case 'q':
             //freeMemory();
+            printf("Encerrando o programa.\n");
             return 0;
         case 'c':
             printf("Processando comando 'c'\n");
@@ -252,7 +233,7 @@ int main() {
             }
 
             getchar(); // Limpa o \n deixado no buffer
-            char input[200];
+            char input[1000];
             fgets(input, sizeof(input), stdin);
             char* token = strtok(input, " ");
             if (token == NULL || sscanf(token, "%20s", batch) != 1) {
@@ -305,6 +286,9 @@ int main() {
         case 'u':
             break;
         case 't':
+            break;
+        default:
+            printf("Comando desconhecido.\n");
             break;
     }
     
